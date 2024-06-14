@@ -9,10 +9,11 @@
 #include <igl/is_edge_manifold.h>
 #include <igl/is_vertex_manifold.h>
 #include <igl/map_vertices_to_circle.h>
-#include <igl/png/writePNG.h>
 #include <igl/readOBJ.h>
 #include <igl/readOFF.h>
 #include <igl/writeOBJ.h>
+// #include <igl/png/writePNG.h>
+
 #include <sys/stat.h>  // for mkdir
 
 #include <ctime>
@@ -98,6 +99,19 @@ double secPast = 0.0;
 time_t lastStart_world;
 Timer timer, timer_step;
 
+void release_resource()
+{
+    logFile.close();
+
+    for (auto& eI : energyTerms)
+    {
+        if (eI) delete eI;
+    }
+
+    if (optimizer) delete optimizer;
+    if (triSoup[0]) delete triSoup[0];
+}
+
 void saveInfoForPresent(const std::string fileName = "info.txt")
 {
     std::ofstream file;
@@ -141,7 +155,7 @@ void proceedOptimization(int proceedNum = 1)
     for (int proceedI = 0; (proceedI < proceedNum) && (!converged); proceedI++)
     {
         // 迭代
-        std::cout << "-- Iteration" << iterNum << ":" << std::endl;
+        std::cout << "-- it " << iterNum << " : ";
         // 优化求解|收敛
         converged = optimizer->solve(1);
         iterNum = optimizer->getIterNum();
@@ -232,7 +246,9 @@ bool checkCand(const std::vector<std::pair<double, double>>& energyChanges)
             minEChange = candI.second;
         }
     }
-    std::cout << "candidates not valid, minEChange: " << minEChange << std::endl;
+
+    // candidates|候选
+    // std::cout << "candidates not valid, minEChange: " << minEChange << std::endl;
     return false;
 }
 
@@ -605,7 +621,8 @@ void preDrawFunc()
     E_se /= triSoup[channel_result]->virtualRadius;
     const double E_SD = optimizer->getLastEnergyVal(true) / energyParams[0];
 
-    std::cout << iterNum << ": " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
+    // 迭代|重新计算??
+    std::cout << "-- it " << iterNum << " : " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
     logFile << iterNum << ": " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
     optimizer->flushEnergyFileOutput();
     optimizer->flushGradFileOutput();
@@ -687,10 +704,13 @@ void postDrawFunc()
     triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + "_mesh.obj", F);
     triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + "_mesh_normalizedUV.obj", F, true);
 
-    // 保存结果
-    saveInfoForPresent();
-    std::cout << ">>> optimization on times " << optimization_on_times << std::endl;
-    std::cout << ">>> iter num zero times " << iter_num_zero << std::endl;
+    // saveInfoForPresent();  // info.txt
+
+    // std::cout << ">>> optimization on times " << optimization_on_times << std::endl;
+    // std::cout << ">>> iter num zero times " << iter_num_zero << std::endl;
+
+    // 释放资源
+    release_resource();
 
     // 退出
     exit(0);
@@ -979,7 +999,7 @@ int main(int argc, char* argv[])
             std::vector<int> components_to_cut;
             for (int componentI = 0; componentI < n_components; ++componentI)
             {
-                std::cout << ">>> component " << componentI << std::endl;
+                // std::cout << ">>> component " << componentI << std::endl;
 
                 int EC = igl::euler_characteristic(temp.V, F_component[componentI]) - temp.V.rows() + V_ind_component[componentI].size();
                 std::cout << "euler_characteristic " << EC << std::endl;
@@ -1093,7 +1113,7 @@ int main(int argc, char* argv[])
         Eigen::MatrixXd bnd_uv_stacked;
         for (int componentI = 0; componentI < n_components; ++componentI)
         {
-            std::cout << ">>> component " << componentI << std::endl;
+            // std::cout << ">>> component " << componentI << std::endl;
 
             std::vector<std::vector<int>> bnd_all;
             igl::boundary_loop(F_component[componentI], bnd_all);
@@ -1210,24 +1230,11 @@ int main(int argc, char* argv[])
     }
     //////////////////////////////////////////////////////////////////////////////
 
-    if (headlessMode)
+    // 正式求解计算
+    while (true)
     {
-        // 正式求解计算
-        while (true)
-        {
-            // 退出在哪里??
-            preDrawFunc();
-            postDrawFunc();
-        }
+        // 退出在哪里??
+        preDrawFunc();
+        postDrawFunc();
     }
-
-    // 并没有释放
-    // Before exit
-    logFile.close();
-    for (auto& eI : energyTerms)
-    {
-        delete eI;
-    }
-    delete optimizer;
-    delete triSoup[0];
 }
