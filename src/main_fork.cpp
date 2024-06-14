@@ -9,19 +9,17 @@
 #include <igl/is_edge_manifold.h>
 #include <igl/is_vertex_manifold.h>
 #include <igl/map_vertices_to_circle.h>
-#include <igl/opengl/glfw/Viewer.h>
 #include <igl/png/writePNG.h>
+#include <igl/readOBJ.h>
 #include <igl/readOFF.h>
+#include <igl/writeOBJ.h>
 #include <sys/stat.h>  // for mkdir
 
 #include <ctime>
 #include <fstream>
 #include <string>
 
-#include "Diagnostic.hpp"
-#include "GIF.hpp"
 #include "IglUtils.hpp"
-#include "MeshProcessing.hpp"
 #include "Optimizer.hpp"
 #include "SymDirichletEnergy.hpp"
 #include "Timer.hpp"
@@ -50,6 +48,10 @@ bool bijectiveParam = true;
 bool rand1PInitCut = false;
 double lambda_init;
 bool optimization_on = false;
+
+int optimization_on_times = 0;
+int iter_num_zero = 0;
+
 int iterNum = 0;
 int converged = 0;
 bool fractureMode = false;
@@ -76,7 +78,6 @@ std::string outputFolderPath = "output/";
 
 // visualization
 bool headlessMode = false;
-igl::opengl::glfw::Viewer viewer;
 const int channel_initial = 0;
 const int channel_result = 1;
 const int channel_findExtrema = 2;
@@ -91,286 +92,11 @@ bool isLighting = false;
 bool showFracTail = true;
 float fracTailSize = 15.0f;
 bool offlineMode = false;
-bool saveInfo_postDraw = false;
 std::string infoName = "";
-bool isCapture3D = false;
-int capture3DI = 0;
-
-GifWriter GIFWriter;
-const uint32_t GIFDelay = 10;  //*10ms
-double GIFScale = 0.25;
 
 double secPast = 0.0;
 time_t lastStart_world;
 Timer timer, timer_step;
-
-void saveInfo(bool writePNG = true, bool writeGIF = true, bool writeMesh = true);
-
-void proceedOptimization(int proceedNum = 1)
-{
-    for (int proceedI = 0; (proceedI < proceedNum) && (!converged); proceedI++)
-    {
-        //        infoName = std::to_string(iterNum);
-        //        saveInfo(true, false, true); //!!! output mesh for making video, PNG output only works under online rendering mode
-        std::cout << "Iteration" << iterNum << ":" << std::endl;
-        converged = optimizer->solve(1);
-        iterNum = optimizer->getIterNum();
-    }
-}
-
-void updateViewerData_meshEdges(void)
-{
-    viewer.data().show_lines = !showSeam;
-
-    viewer.data().set_edges(Eigen::MatrixXd(0, 3), Eigen::MatrixXi(0, 2), Eigen::RowVector3d(0.0, 0.0, 0.0));
-    if (showSeam)
-    {
-        // only draw air mesh edges
-        if (optimizer->isScaffolding() && viewUV && (viewChannel == channel_result))
-        {
-            const Eigen::MatrixXd V_airMesh = optimizer->getAirMesh().V * texScale;
-            for (int triI = 0; triI < optimizer->getAirMesh().F.rows(); triI++)
-            {
-                const Eigen::RowVector3i& triVInd = optimizer->getAirMesh().F.row(triI);
-                for (int eI = 0; eI < 3; eI++)
-                {
-                    viewer.data().add_edges(V_airMesh.row(triVInd[eI]), V_airMesh.row(triVInd[(eI + 1) % 3]), Eigen::RowVector3d::Zero());
-                }
-            }
-        }
-    }
-}
-
-void updateViewerData_seam(Eigen::MatrixXd& V, Eigen::MatrixXi& F, Eigen::MatrixXd& UV)
-{
-    if (showSeam)
-    {
-        const Eigen::VectorXd cohIndices = Eigen::VectorXd::LinSpaced(triSoup[viewChannel]->cohE.rows(), 0, triSoup[viewChannel]->cohE.rows() - 1);
-        Eigen::MatrixXd color;
-        color.resize(cohIndices.size(), 3);
-        color.rowwise() = Eigen::RowVector3d(1.0, 0.5, 0.0);
-
-        seamColor.resize(0, 3);
-        double seamThickness = (viewUV ? (triSoup[viewChannel]->virtualRadius * 0.0007 / viewer.core.model_zoom * texScale)
-                                       : (triSoup[viewChannel]->virtualRadius * 0.006));
-        for (int eI = 0; eI < triSoup[viewChannel]->cohE.rows(); eI++)
-        {
-            const Eigen::RowVector4i& cohE = triSoup[viewChannel]->cohE.row(eI);
-            const auto finder = triSoup[viewChannel]->edge2Tri.find(std::pair<int, int>(cohE[0], cohE[1]));
-            assert(finder != triSoup[viewChannel]->edge2Tri.end());
-            const Eigen::RowVector3d& sn = triSoup[viewChannel]->triNormal.row(finder->second);
-
-            // seam edge
-            OptCuts::IglUtils::addThickEdge(V, F, UV, seamColor, color.row(eI), V.row(cohE[0]), V.row(cohE[1]), seamThickness, texScale, !viewUV, sn);
-            if (viewUV)
-            {
-                OptCuts::IglUtils::addThickEdge(V, F, UV, seamColor, color.row(eI), V.row(cohE[2]), V.row(cohE[3]), seamThickness, texScale, !viewUV,
-                                                sn);
-            }
-        }
-    }
-}
-
-void updateViewerData_distortion(void)
-{
-    Eigen::MatrixXd color_distortionVis;
-
-    switch (showDistortion)
-    {
-        case 1:
-        {  // show SD energy value
-            Eigen::VectorXd distortionPerElem;
-            energyTerms[0]->getEnergyValPerElem(*triSoup[viewChannel], distortionPerElem, true);
-            OptCuts::IglUtils::mapScalarToColor(distortionPerElem, color_distortionVis, 4.0, 8.5);
-            break;
-        }
-
-        case 2:
-        {  // show face weight
-            Eigen::VectorXd faceWeight;
-            faceWeight.resize(triSoup[viewChannel]->F.rows());
-            for (int fI = 0; fI < triSoup[viewChannel]->F.rows(); fI++)
-            {
-                const Eigen::RowVector3i& triVInd = triSoup[viewChannel]->F.row(fI);
-                faceWeight[fI] = (triSoup[viewChannel]->vertWeight[triVInd[0]] + triSoup[viewChannel]->vertWeight[triVInd[1]] +
-                                  triSoup[viewChannel]->vertWeight[triVInd[2]]) /
-                                 3.0;
-            }
-            //            OptCuts::IglUtils::mapScalarToColor(faceWeight, color_distortionVis,
-            //                faceWeight.minCoeff(), faceWeight.maxCoeff());
-            igl::colormap(igl::COLOR_MAP_TYPE_VIRIDIS, faceWeight, true, color_distortionVis);
-            break;
-        }
-
-        case 0:
-        {
-            color_distortionVis = Eigen::MatrixXd::Ones(triSoup[viewChannel]->F.rows(), 3);
-            color_distortionVis.col(2).setZero();
-            break;
-        }
-
-        default:
-            assert(0 && "unknown distortion visualization option!");
-            break;
-    }
-
-    if (optimizer->isScaffolding() && viewUV && (viewChannel == channel_result))
-    {
-        optimizer->getScaffold().augmentFColorwithAirMesh(color_distortionVis);
-    }
-
-    if (showSeam)
-    {
-        color_distortionVis.conservativeResize(color_distortionVis.rows() + seamColor.rows(), 3);
-        color_distortionVis.bottomRows(seamColor.rows()) = seamColor;
-    }
-
-    viewer.data().set_colors(color_distortionVis);
-}
-
-void updateViewerData(void)
-{
-    Eigen::MatrixXd UV_vis = triSoup[viewChannel]->V * texScale;
-    Eigen::MatrixXi F_vis = triSoup[viewChannel]->F;
-    if (viewUV)
-    {
-        if (optimizer->isScaffolding() && (viewChannel == channel_result))
-        {
-            optimizer->getScaffold().augmentUVwithAirMesh(UV_vis, texScale);
-            optimizer->getScaffold().augmentFwithAirMesh(F_vis);
-        }
-        UV_vis.conservativeResize(UV_vis.rows(), 3);
-        UV_vis.rightCols(1) = Eigen::VectorXd::Zero(UV_vis.rows());
-        viewer.core.align_camera_center(UV_vis, F_vis);
-        updateViewerData_seam(UV_vis, F_vis, UV_vis);
-
-        if ((UV_vis.rows() != viewer.data().V.rows()) || (F_vis.rows() != viewer.data().F.rows()))
-        {
-            viewer.data().clear();
-        }
-        viewer.data().set_mesh(UV_vis, F_vis);
-
-        viewer.data().show_texture = false;
-        viewer.core.lighting_factor = 0.0;
-
-        updateViewerData_meshEdges();
-
-        viewer.data().set_points(Eigen::MatrixXd::Zero(0, 3), Eigen::RowVector3d(0.0, 0.0, 0.0));
-        if (showFracTail)
-        {
-            for (const auto& tailVI : triSoup[viewChannel]->fracTail)
-            {
-                viewer.data().add_points(UV_vis.row(tailVI), Eigen::RowVector3d(0.0, 0.0, 0.0));
-            }
-        }
-    }
-    else
-    {
-        Eigen::MatrixXd V_vis = triSoup[viewChannel]->V_rest;
-        viewer.core.align_camera_center(V_vis, F_vis);
-        updateViewerData_seam(V_vis, F_vis, UV_vis);
-
-        if ((V_vis.rows() != viewer.data().V.rows()) || (UV_vis.rows() != viewer.data().V_uv.rows()) || (F_vis.rows() != viewer.data().F.rows()))
-        {
-            viewer.data().clear();
-        }
-        viewer.data().set_mesh(V_vis, F_vis);
-
-        if (showTexture)
-        {
-            viewer.data().set_uv(UV_vis);
-            viewer.data().show_texture = true;
-        }
-        else
-        {
-            viewer.data().show_texture = false;
-        }
-
-        if (isLighting)
-        {
-            viewer.core.lighting_factor = 1.0;
-        }
-        else
-        {
-            viewer.core.lighting_factor = 0.0;
-        }
-
-        updateViewerData_meshEdges();
-
-        viewer.data().set_points(Eigen::MatrixXd::Zero(0, 3), Eigen::RowVector3d(0.0, 0.0, 0.0));
-        if (showFracTail)
-        {
-            for (const auto& tailVI : triSoup[viewChannel]->fracTail)
-            {
-                viewer.data().add_points(V_vis.row(tailVI), Eigen::RowVector3d(0.0, 0.0, 0.0));
-            }
-        }
-    }
-    updateViewerData_distortion();
-
-    viewer.data().compute_normals();
-}
-
-void saveScreenshot(const std::string& filePath, double scale = 1.0, bool writeGIF = false, bool writePNG = true)
-{
-    if (headlessMode)
-    {
-        return;
-    }
-
-    if (writeGIF)
-    {
-        scale = GIFScale;
-    }
-    viewer.data().point_size = fracTailSize * scale;
-
-    int width = static_cast<int>(scale * (viewer.core.viewport[2] - viewer.core.viewport[0]));
-    int height = static_cast<int>(scale * (viewer.core.viewport[3] - viewer.core.viewport[1]));
-
-    // Allocate temporary buffers for image
-    Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> R(width, height);
-    Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> G(width, height);
-    Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> B(width, height);
-    Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> A(width, height);
-
-    // Draw the scene in the buffers
-    viewer.core.draw_buffer(viewer.data(), false, R, G, B, A);
-
-    if (writePNG)
-    {
-        // Save it to a PNG
-        igl::png::writePNG(R, G, B, A, filePath);
-    }
-
-    if (writeGIF)
-    {
-        std::vector<uint8_t> img(width * height * 4);
-        for (int rowI = 0; rowI < width; rowI++)
-        {
-            for (int colI = 0; colI < height; colI++)
-            {
-                int indStart = (rowI + (height - 1 - colI) * width) * 4;
-                img[indStart] = R(rowI, colI);
-                img[indStart + 1] = G(rowI, colI);
-                img[indStart + 2] = B(rowI, colI);
-                img[indStart + 3] = A(rowI, colI);
-            }
-        }
-        GifWriteFrame(&GIFWriter, img.data(), width, height, GIFDelay);
-    }
-
-    viewer.data().point_size = fracTailSize;
-}
-
-void saveInfo(bool writePNG, bool writeGIF, bool writeMesh)
-{
-    saveScreenshot(outputFolderPath + infoName + ".png", 0.5, writeGIF, writePNG);
-    if (writeMesh)
-    {
-        triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + "_mesh.obj", F);
-        triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + "_mesh_normalizedUV.obj", F, true);
-    }
-}
 
 void saveInfoForPresent(const std::string fileName = "info.txt")
 {
@@ -397,10 +123,6 @@ void saveInfoForPresent(const std::string fileName = "info.txt")
     else
     {
         triSoup[channel_result]->computeSeamSparsity(seamLen, !fractureMode);
-        //        // for models with initial cuts also reflected on the surface as boundary edges...
-        //        double boundaryLen;
-        //        triSoup[channel_result]->computeBoundaryLen(boundaryLen);
-        //        seamLen += boundaryLen;
     }
     double distortion;
     energyTerms[0]->computeEnergyVal(*triSoup[channel_result], distortion);
@@ -414,179 +136,16 @@ void saveInfoForPresent(const std::string fileName = "info.txt")
     file.close();
 }
 
-void toggleOptimization(void)
+void proceedOptimization(int proceedNum = 1)
 {
-    optimization_on = !optimization_on;
-    if (optimization_on)
+    for (int proceedI = 0; (proceedI < proceedNum) && (!converged); proceedI++)
     {
-        if (converged)
-        {
-            optimization_on = false;
-            std::cout << "optimization converged." << std::endl;
-        }
-        else
-        {
-            if ((!headlessMode) && (iterNum == 0))
-            {
-                GifBegin(&GIFWriter, (outputFolderPath + "anim.gif").c_str(), GIFScale * (viewer.core.viewport[2] - viewer.core.viewport[0]),
-                         GIFScale * (viewer.core.viewport[3] - viewer.core.viewport[1]), GIFDelay);
-
-                saveScreenshot(outputFolderPath + "0.png", 0.5, true);
-            }
-            std::cout << "start/resume optimization, press again to pause." << std::endl;
-            viewer.core.is_animating = true;
-
-            time(&lastStart_world);
-        }
+        // 迭代
+        std::cout << "-- Iteration" << iterNum << ":" << std::endl;
+        // 优化求解|收敛
+        converged = optimizer->solve(1);
+        iterNum = optimizer->getIterNum();
     }
-    else
-    {
-        std::cout << "pause optimization, press again to resume." << std::endl;
-        viewer.core.is_animating = false;
-        std::cout << "World Time:\nTime past: " << secPast << "s." << std::endl;
-        secPast += difftime(time(NULL), lastStart_world);
-    }
-}
-
-bool key_down(igl::opengl::glfw::Viewer& viewer, unsigned char key, int modifier)
-{
-    if ((key >= '0') && (key <= '9'))
-    {
-        int changeToChannel = key - '0';
-        if ((changeToChannel < triSoup.size()) && (viewChannel != changeToChannel))
-        {
-            viewChannel = changeToChannel;
-        }
-    }
-    else
-    {
-        switch (key)
-        {
-            case '/':
-            {
-                toggleOptimization();
-                break;
-            }
-
-            case 'u':
-            case 'U':
-            {
-                viewUV = !viewUV;
-                break;
-            }
-
-            case 's':
-            case 'S':
-            {
-                showSeam = !showSeam;
-                break;
-            }
-
-            case 'd':
-            case 'D':
-            {
-                showDistortion++;
-                if (showDistortion > 2)
-                {
-                    showDistortion = 0;
-                }
-                break;
-            }
-
-            case 'c':
-            case 'C':
-            {
-                showTexture = !showTexture;
-                break;
-            }
-
-            case 'b':
-            case 'B':
-            {
-                isLighting = !isLighting;
-                break;
-            }
-
-            case 'o':
-            case 'O':
-            {
-                infoName = std::to_string(iterNum);
-                saveInfo(true, false, true);
-                break;
-            }
-
-            case 'p':
-            case 'P':
-            {
-                showFracTail = !showFracTail;
-                break;
-            }
-
-            default:
-                break;
-        }
-    }
-
-    updateViewerData();
-
-    return false;
-}
-
-bool postDrawFunc(igl::opengl::glfw::Viewer& viewer)
-{
-    if (offlineMode && (iterNum == 0))
-    {
-        toggleOptimization();
-    }
-
-    if (saveInfo_postDraw)
-    {
-        saveInfo_postDraw = false;
-        saveInfo(outerLoopFinished, true, outerLoopFinished);
-        //        saveInfo(true, false, false);
-        // Note that the content saved in the screenshots are depends on where updateViewerData() is called
-    }
-
-    if (outerLoopFinished)
-    {
-        if (!isCapture3D)
-        {
-            viewer.core.is_animating = true;
-            isCapture3D = true;
-        }
-        else
-        {
-            if (capture3DI < 2)
-            {
-                // take screenshot
-                std::cout << "Taking screenshot for 3D View " << capture3DI / 2 << std::endl;
-                std::string filePath =
-                    outputFolderPath + "3DView" + std::to_string(capture3DI / 2) + ((capture3DI % 2 == 0) ? "_seam.png" : "_distortion.png");
-                saveScreenshot(filePath, 0.5);
-                capture3DI++;
-            }
-            else
-            {
-                if (!headlessMode)
-                {
-                    GifEnd(&GIFWriter);
-                }
-                saveInfoForPresent();
-                if (offlineMode)
-                {
-                    exit(0);
-                }
-                else
-                {
-                    viewer.core.is_animating = false;
-                    isCapture3D = false;
-                    outerLoopFinished = false;
-                }
-            }
-        }
-    }
-
-    return false;
 }
 
 int computeOptPicked(const std::vector<std::pair<double, double>>& energyChanges0, const std::vector<std::pair<double, double>>& energyChanges1,
@@ -818,10 +377,8 @@ bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence 
             if (!saved)
             {
                 //                logFile << "saving firstFeasibleS..." << std::endl;
-                //                saveScreenshot(outputFolderPath + "firstFeasibleS.png", 0.5, false, true); //TODO: saved is before roll back...
                 //                triSoup[channel_result]->saveAsMesh(outputFolderPath + "firstFeasibleS_mesh.obj", F);
                 secPast += difftime(time(NULL), lastStart_world);
-                //                saveInfoForPresent("info_firstFeasibleS.txt");
                 time(&lastStart_world);
                 saved = true;
                 //                logFile << "firstFeasibleS saved" << std::endl;
@@ -854,18 +411,6 @@ bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence 
             // need to cut further, increase energyParams[0]
             logFile << "curUpdated = " << energyParams[0] << ", increase" << std::endl;
 
-            //            std::cout << "iSplit:" << std::endl;
-            //            for(const auto& i : energyChanges_iSplit) {
-            //                std::cout << i.first << "," << i.second << std::endl;
-            //            }
-            //            std::cout << "bSplit:" << std::endl;
-            //            for(const auto& i : energyChanges_bSplit) {
-            //                std::cout << i.first << "," << i.second << std::endl;
-            //            }
-            //            std::cout << "merge:" << std::endl;
-            //            for(const auto& i : energyChanges_merge) {
-            //                std::cout << i.first << "," << i.second << std::endl;
-            //            }
             if ((!energyChanges_merge.empty()) && (computeOptPicked(energyChanges_bSplit, energyChanges_merge, 1.0 - energyParams[0]) == 1))
             {
                 // still picking merge
@@ -981,7 +526,7 @@ bool updateLambda_stationaryV(bool cancelMomentum = true, bool checkConvergence 
     return true;
 }
 
-void converge_preDrawFunc(igl::opengl::glfw::Viewer& viewer)
+void converge_preDrawFunc()
 {
     infoName = "finalResult";
 
@@ -991,6 +536,7 @@ void converge_preDrawFunc(igl::opengl::glfw::Viewer& viewer)
         optimizer->setAllowEDecRelTol(false);
         converged = false;
         optimizer->setPropagateFracture(false);
+
         while (!converged)
         {
             proceedOptimization(1000);
@@ -998,268 +544,164 @@ void converge_preDrawFunc(igl::opengl::glfw::Viewer& viewer)
     }
 
     secPast += difftime(time(NULL), lastStart_world);
-    updateViewerData();
 
     optimizer->flushEnergyFileOutput();
     optimizer->flushGradFileOutput();
 
     optimization_on = false;
-    viewer.core.is_animating = false;
+
     std::cout << "optimization converged, with " << secPast << "s." << std::endl;
     logFile << "optimization converged, with " << secPast << "s." << std::endl;
-    outerLoopFinished = true;
+    outerLoopFinished = true;  // 预告结束
 }
 
-bool preDrawFunc(igl::opengl::glfw::Viewer& viewer)
+void preDrawFunc()
 {
-    if (optimization_on)
+    if (!optimization_on) return;
+
+    optimization_on_times++;
+    // 收敛|converged
+    while (!converged)
     {
-        if (offlineMode)
+        proceedOptimization();
+    }
+
+    if (!converged) return;
+
+    double stretch_l2, stretch_inf, stretch_shear, compress_inf;
+    triSoup[channel_result]->computeStandardStretch(stretch_l2, stretch_inf, stretch_shear, compress_inf);
+    double measure_bound = optimizer->getLastEnergyVal(true) / energyParams[0];
+
+    // case OptCuts::MT_OPTCUTS:
+    infoName = std::to_string(iterNum);
+    if (converged == 2)
+    {
+        converged = 0;
+        return;
+    }
+
+    if (measure_bound <= upperBound)
+    {
+        // save info once bound is reached for comparison
+        static bool saved = false;
+        if (!saved)
         {
-            while (!converged)
-            {
-                proceedOptimization();
-            }
+            //                            triSoup[channel_result]->save(outputFolderPath + infoName + "_triSoup.obj");
+            //                            triSoup[channel_result]->saveAsMesh(outputFolderPath + "firstFeasible_mesh.obj", F);
+            secPast += difftime(time(NULL), lastStart_world);
+            time(&lastStart_world);
+            saved = true;
         }
-        else
+    }
+
+    // if necessary, turn on scaffolding for random one point initial cut
+    if (!optimizer->isScaffolding() && bijectiveParam && rand1PInitCut)
+    {
+        optimizer->setScaffolding(true);
+    }
+
+    double E_se;
+    triSoup[channel_result]->computeSeamSparsity(E_se);
+    E_se /= triSoup[channel_result]->virtualRadius;
+    const double E_SD = optimizer->getLastEnergyVal(true) / energyParams[0];
+
+    std::cout << iterNum << ": " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
+    logFile << iterNum << ": " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
+    optimizer->flushEnergyFileOutput();
+    optimizer->flushGradFileOutput();
+
+    // continue to split boundary
+    if (!updateLambda_stationaryV())
+    {
+        // oscillation detected
+        converge_preDrawFunc();
+        return;
+    }
+
+    logFile << "boundary op V " << triSoup[channel_result]->V_rest.rows() << std::endl;
+    if (optimizer->createFracture(fracThres, false, topoLineSearch))
+    {
+        converged = false;
+        return;
+    }
+
+    // if no boundary op, try interior split if split is the current best boundary op
+    if ((measure_bound > upperBound) && optimizer->createFracture(fracThres, false, topoLineSearch, true))
+    {
+        logFile << "interior split " << triSoup[channel_result]->V_rest.rows() << std::endl;
+        converged = false;
+        return;
+    }
+
+    if (!updateLambda_stationaryV(false, true))
+    {
+        // all converged
+        converge_preDrawFunc();
+        return;
+    }
+
+    // split or merge after lambda update
+    if (reQuery)
+    {
+        filterExp_in += std::log(2.0) / std::log(inSplitTotalAmt);
+        filterExp_in = std::min(1.0, filterExp_in);
+        while (!optimizer->createFracture(fracThres, false, topoLineSearch, true))
         {
-            proceedOptimization();
+            filterExp_in += std::log(2.0) / std::log(inSplitTotalAmt);
+            filterExp_in = std::min(1.0, filterExp_in);
         }
-
-        updateViewerData();
-
-        if (converged)
-        {
-            saveInfo_postDraw = true;
-
-            double stretch_l2, stretch_inf, stretch_shear, compress_inf;
-            triSoup[channel_result]->computeStandardStretch(stretch_l2, stretch_inf, stretch_shear, compress_inf);
-            double measure_bound = optimizer->getLastEnergyVal(true) / energyParams[0];
-
-            switch (methodType)
-            {
-                case OptCuts::MT_EBCUTS:
-                {
-                    if (measure_bound <= upperBound)
-                    {
-                        logFile << "measure reaches user specified upperbound " << upperBound << std::endl;
-
-                        infoName = "finalResult";
-                        // perform exact solve
-                        optimizer->setAllowEDecRelTol(false);
-                        converged = false;
-                        while (!converged)
-                        {
-                            proceedOptimization(1000);
-                        }
-                        secPast += difftime(time(NULL), lastStart_world);
-                        updateViewerData();
-
-                        optimization_on = false;
-                        viewer.core.is_animating = false;
-                        std::cout << "optimization converged, with " << secPast << "s." << std::endl;
-                        logFile << "optimization converged, with " << secPast << "s." << std::endl;
-                        outerLoopFinished = true;
-                    }
-                    else
-                    {
-                        infoName = std::to_string(iterNum);
-
-                        // continue to make geometry image cuts
-                        bool returnVal = optimizer->createFracture(fracThres, false, false);
-                        assert(returnVal);
-                        converged = false;
-                    }
-                    optimizer->flushEnergyFileOutput();
-                    optimizer->flushGradFileOutput();
-                    break;
-                }
-
-                case OptCuts::MT_OPTCUTS_NODUAL:
-                case OptCuts::MT_OPTCUTS:
-                {
-                    infoName = std::to_string(iterNum);
-                    if (converged == 2)
-                    {
-                        converged = 0;
-                        return false;
-                    }
-
-                    if ((methodType == OptCuts::MT_OPTCUTS) && (measure_bound <= upperBound))
-                    {
-                        // save info once bound is reached for comparison
-                        static bool saved = false;
-                        if (!saved)
-                        {
-                            //                            saveScreenshot(outputFolderPath + "firstFeasible.png", 0.5, false, true);
-                            //                            triSoup[channel_result]->save(outputFolderPath + infoName + "_triSoup.obj");
-                            //                            triSoup[channel_result]->saveAsMesh(outputFolderPath + "firstFeasible_mesh.obj", F);
-                            secPast += difftime(time(NULL), lastStart_world);
-                            //                            saveInfoForPresent("info_firstFeasible.txt");
-                            time(&lastStart_world);
-                            saved = true;
-                        }
-                    }
-
-                    // if necessary, turn on scaffolding for random one point initial cut
-                    if (!optimizer->isScaffolding() && bijectiveParam && rand1PInitCut)
-                    {
-                        optimizer->setScaffolding(true);
-                    }
-
-                    double E_se;
-                    triSoup[channel_result]->computeSeamSparsity(E_se);
-                    E_se /= triSoup[channel_result]->virtualRadius;
-                    const double E_SD = optimizer->getLastEnergyVal(true) / energyParams[0];
-
-                    std::cout << iterNum << ": " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
-                    logFile << iterNum << ": " << E_SD << " " << E_se << " " << triSoup[channel_result]->V_rest.rows() << std::endl;
-                    optimizer->flushEnergyFileOutput();
-                    optimizer->flushGradFileOutput();
-
-                    // continue to split boundary
-                    if ((methodType == OptCuts::MT_OPTCUTS) && (!updateLambda_stationaryV()))
-                    {
-                        // oscillation detected
-                        converge_preDrawFunc(viewer);
-                    }
-                    else
-                    {
-                        logFile << "boundary op V " << triSoup[channel_result]->V_rest.rows() << std::endl;
-                        if (optimizer->createFracture(fracThres, false, topoLineSearch))
-                        {
-                            converged = false;
-                        }
-                        else
-                        {
-                            // if no boundary op, try interior split if split is the current best boundary op
-                            if ((measure_bound > upperBound) && optimizer->createFracture(fracThres, false, topoLineSearch, true))
-                            {
-                                logFile << "interior split " << triSoup[channel_result]->V_rest.rows() << std::endl;
-                                converged = false;
-                            }
-                            else
-                            {
-                                if ((methodType == OptCuts::MT_OPTCUTS_NODUAL) || (!updateLambda_stationaryV(false, true)))
-                                {
-                                    // all converged
-                                    converge_preDrawFunc(viewer);
-                                }
-                                else
-                                {
-                                    // split or merge after lambda update
-                                    if (reQuery)
-                                    {
-                                        filterExp_in += std::log(2.0) / std::log(inSplitTotalAmt);
-                                        filterExp_in = std::min(1.0, filterExp_in);
-                                        while (!optimizer->createFracture(fracThres, false, topoLineSearch, true))
-                                        {
-                                            filterExp_in += std::log(2.0) / std::log(inSplitTotalAmt);
-                                            filterExp_in = std::min(1.0, filterExp_in);
-                                        }
-                                        reQuery = false;
-                                        // TODO: set filtering param back?
-                                    }
-                                    else
-                                    {
-                                        optimizer->createFracture(opType_queried, path_queried, newVertPos_queried, topoLineSearch);
-                                    }
-                                    opType_queried = -1;
-                                    converged = false;
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-
-                case OptCuts::MT_DISTMIN:
-                {
-                    converge_preDrawFunc(viewer);
-                    break;
-                }
-            }
-        }
+        reQuery = false;
+        // TODO: set filtering param back?
     }
     else
     {
-        if (isCapture3D && (capture3DI < 2))
+        optimizer->createFracture(opType_queried, path_queried, newVertPos_queried, topoLineSearch);
+    }
+
+    opType_queried = -1;
+    converged = false;
+}
+
+void postDrawFunc()
+{
+    if (iterNum == 0)
+    {
+        iter_num_zero++;
+
+        if (optimization_on)
         {
-            // change view accordingly
-            double rotDeg = ((capture3DI < 8) ? (M_PI_2 * (capture3DI / 2)) : M_PI_2);
-            Eigen::Vector3f rotAxis = Eigen::Vector3f::UnitY();
-            if ((capture3DI / 2) == 4)
-            {
-                rotAxis = Eigen::Vector3f::UnitX();
-            }
-            else if ((capture3DI / 2) == 5)
-            {
-                rotAxis = -Eigen::Vector3f::UnitX();
-            }
-            viewer.core.trackball_angle = Eigen::Quaternionf(Eigen::AngleAxisf(rotDeg, rotAxis));
-            viewChannel = channel_result;
-            viewUV = false;
-            showSeam = true;
-            isLighting = false;
-            showTexture = capture3DI % 2;
-            showDistortion = 2 - capture3DI % 2;
-            updateViewerData();
+            optimization_on = false;
+            return;
+        }
+
+        if (!optimization_on && !converged)
+        {
+            optimization_on = true;
+            return;
         }
     }
-    return false;
+
+    if (!outerLoopFinished) return;
+
+    // 保存模型
+    triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + "_mesh.obj", F);
+    triSoup[channel_result]->saveAsMesh(outputFolderPath + infoName + "_mesh_normalizedUV.obj", F, true);
+
+    // 保存结果
+    saveInfoForPresent();
+    std::cout << ">>> optimization on times " << optimization_on_times << std::endl;
+    std::cout << ">>> iter num zero times " << iter_num_zero << std::endl;
+
+    // 退出
+    exit(0);
 }
 
 int main(int argc, char* argv[])
 {
-    int progMode = 0;
-    if (argc > 1)
-    {
-        progMode = std::stoi(argv[1]);
-    }
-    switch (progMode)
-    {
-        case 0:
-            // optimization mode
-            std::cout << "Optimization mode" << std::endl;
-            break;
-
-        case 10:
-        {
-            // offline optimization mode
-            offlineMode = true;
-            std::cout << "Offline optimization mode" << std::endl;
-            break;
-        }
-
-        case 100:
-        {
-            // headless mode
-            offlineMode = true;
-            headlessMode = true;
-            std::cout << "Headless mode" << std::endl;
-            break;
-        }
-
-        case 1:
-        {
-            // diagnostic mode
-            OptCuts::Diagnostic::run(argc, argv);
-            return 0;
-        }
-
-        case 2:
-        {
-            // mesh processing mode
-            OptCuts::MeshProcessing::run(argc, argv);
-            return 0;
-        }
-
-        default:
-        {
-            std::cout << "No progMode " << progMode << std::endl;
-            return 0;
-        }
-    }
+    // headless mode
+    offlineMode = true;
+    headlessMode = true;
+    std::cout << "Headless mode" << std::endl;
 
     // Optimization mode
     mkdir(outputFolderPath.c_str(), 0777);
@@ -1284,6 +726,7 @@ int main(int argc, char* argv[])
     }
     else if (suffix == ".obj")
     {
+        // 输入数据
         loadSucceed = igl::readOBJ(meshFilePath, V, UV, N, F, FUV, FN);
     }
     else
@@ -1307,11 +750,6 @@ int main(int argc, char* argv[])
         std::cout << "please cleanup the mesh and retry" << std::endl;
         exit(-1);
     }
-
-    //    //DEBUG
-    //    OptCuts::TriMesh squareMesh(OptCuts::P_SQUARE, 1.0, 0.1, false);
-    //    V = squareMesh.V_rest;
-    //    F = squareMesh.F;
 
     // Set lambda
     lambda_init = 0.999;
@@ -1345,39 +783,15 @@ int main(int argc, char* argv[])
         std::cout << "Use default testID = " << testID << std::endl;
     }
 
-    if (argc > 5)
-    {
-        methodType = OptCuts::MethodType(std::stoi(argv[5]));
-    }
-    else
-    {
-        std::cout << "Use default method: OptCuts." << std::endl;
-    }
-
     std::string startDS;
-    switch (methodType)
+
+    // extern 访问|argv[5]
+    methodType = OptCuts::MT_OPTCUTS;
+    // switch (methodType)
+    // case OptCuts::MT_OPTCUTS:
     {
-        case OptCuts::MT_OPTCUTS_NODUAL:
-            startDS = "OptCuts_noDual";
-            break;
-
-        case OptCuts::MT_OPTCUTS:
-            startDS = "OptCuts";
-            break;
-
-        case OptCuts::MT_EBCUTS:
-            startDS = "EBCuts";
-            bijectiveParam = false;
-            break;
-
-        case OptCuts::MT_DISTMIN:
-            lambda_init = 0.0;
-            startDS = "DistMin";
-            break;
-
-        default:
-            assert(0 && "method type not valid!");
-            break;
+        startDS = "OptCuts";
+        std::cout << ">>> method: OptCuts." << std::endl;
     }
 
     if (argc > 6)
@@ -1468,6 +882,7 @@ int main(int argc, char* argv[])
     if (UV.rows() != 0)
     {
         // with input UV
+        // 构造输入 Mesh|自带UV
         OptCuts::TriMesh* temp = new OptCuts::TriMesh(V, F, UV, FUV, false);
 
         std::vector<std::vector<int>> bnd_all;
@@ -1531,6 +946,7 @@ int main(int argc, char* argv[])
             }
         }
 
+        // 输入
         triSoup.emplace_back(temp);
         outputFolderPath +=
             meshName + "_input_" + OptCuts::IglUtils::rtos(lambda_init) + "_" + OptCuts::IglUtils::rtos(testID) + "_" + startDS + folderTail;
@@ -1544,6 +960,7 @@ int main(int argc, char* argv[])
         int n_components = C.maxCoeff() + 1;
         std::cout << n_components << " disconnected components in total" << std::endl;
 
+        // 构造输入 Mesh|没有UV
         // in each pass, make one cut on each component if needed, until all becoming disk-topology
         OptCuts::TriMesh temp(V, F, Eigen::MatrixXd(), Eigen::MatrixXi(), false);
         std::vector<Eigen::MatrixXi> F_component(n_components);
@@ -1713,6 +1130,7 @@ int main(int argc, char* argv[])
         OptCuts::IglUtils::computeUniformLaplacian(temp.F, A);
         igl::harmonic(A, M, bnd_stacked, bnd_uv_stacked, 1, UV_Tutte);
 
+        // 输入
         triSoup.emplace_back(new OptCuts::TriMesh(V, F, UV_Tutte, temp.F, false));
         outputFolderPath +=
             meshName + "_Tutte_" + OptCuts::IglUtils::rtos(lambda_init) + "_" + OptCuts::IglUtils::rtos(testID) + "_" + startDS + folderTail;
@@ -1723,6 +1141,8 @@ int main(int argc, char* argv[])
 
     mkdir(outputFolderPath.c_str(), 0777);
     outputFolderPath += '/';
+
+    // 保存输入初始状态
     igl::writeOBJ(outputFolderPath + "initial_cuts.obj", triSoup.back()->V_rest, triSoup.back()->F);
     logFile.open(outputFolderPath + "log.txt");
     if (!logFile.is_open())
@@ -1752,14 +1172,16 @@ int main(int argc, char* argv[])
     energyParams.emplace_back(1.0 - lambda_init);
     energyTerms.emplace_back(new OptCuts::SymDirichletEnergy());
 
+    // 优化器
     optimizer = new OptCuts::Optimizer(*triSoup[0], energyTerms, energyParams, 0, false,
                                        bijectiveParam && !rand1PInitCut);  // for random one point initial cut, don't need air meshes in the beginning
                                                                            // since it's impossible for a quad to intersect itself
-
     optimizer->precompute();
+
     triSoup.emplace_back(&optimizer->getResult());
     triSoup_backup = optimizer->getResult();
     triSoup.emplace_back(&optimizer->getData_findExtrema());  // for visualizing UV map for finding extrema
+
     if (lambda_init > 0.0)
     {
         // fracture mode
@@ -1793,27 +1215,13 @@ int main(int argc, char* argv[])
         // 正式求解计算
         while (true)
         {
-            preDrawFunc(viewer);
-            postDrawFunc(viewer);
+            // 退出在哪里??
+            preDrawFunc();
+            postDrawFunc();
         }
     }
-    else
-    {
-        // Setup viewer and launch
-        viewer.core.background_color << 1.0f, 1.0f, 1.0f, 0.0f;
-        viewer.callback_key_down = &key_down;
-        viewer.callback_pre_draw = &preDrawFunc;
-        viewer.callback_post_draw = &postDrawFunc;
-        viewer.data().show_lines = true;
-        viewer.core.orthographic = true;
-        viewer.core.camera_zoom *= 1.9;
-        viewer.core.animation_max_fps = 60.0;
-        viewer.data().point_size = fracTailSize;
-        viewer.data().show_overlay = true;
-        updateViewerData();
-        viewer.launch();
-    }
 
+    // 并没有释放
     // Before exit
     logFile.close();
     for (auto& eI : energyTerms)

@@ -4,7 +4,7 @@ CWD = os.path.dirname(__file__)
 os.chdir(CWD)
 
 
-def build_optcuts(config="Debug"):
+def build_optcuts(config="Release"):
     cpu = max(1, os.cpu_count() - 1)
     print(f">>> use cpu core {cpu}")
 
@@ -16,15 +16,17 @@ def build_optcuts(config="Debug"):
 
 def run_solver(headless=True, config="Release"):
     input_model = "input/bimba_i_f10000.obj"
+    input_model = "input/benchmark/bishop_part.obj"  # 简单模型
 
     mode = 100 if headless else 10
-    OPT_EXE = f"build/{config}/OptCuts_bin.exe"
+    OPT_EXE = os.path.abspath(f"build/{config}/OptCuts_bin.exe")  # 需要绝对路径
 
     subprocess.run(f"{OPT_EXE} {mode} {input_model} 0.999 1 0 4.1 1 0", shell=True)
 
 
 if __name__ == "__main__":
     build_optcuts()
+    run_solver()
 
 
 __doc__ = r"""

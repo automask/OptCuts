@@ -63,9 +63,12 @@ include_directories(
   src/Energy
   src/Utils
   src/LinSysSolver
-  src/UnitTest
+  # src/UnitTest # Diagnostic.hpp MeshProcessing.hpp
 )
 
 add_executable(${PROJECT_NAME}_bin ${SRCFILES})
+if(MSVC)
+  target_compile_options(${PROJECT_NAME}_bin PRIVATE /wd4819)
+endif()
 
 target_link_libraries(${PROJECT_NAME}_bin igl::core igl::opengl_glfw igl::triangle igl::png TBB::tbb)
