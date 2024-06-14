@@ -26,8 +26,8 @@
 #include <numeric>
 
 extern OptCuts::MethodType methodType;
-extern const std::string outputFolderPath;
-extern const bool fractureMode;
+extern std::string outputFolderPath;
+extern bool fractureMode;
 
 extern std::ofstream logFile;
 extern Timer timer, timer_step;

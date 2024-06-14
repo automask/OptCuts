@@ -4,6 +4,13 @@ project(OptCuts)
 set(OPTCUTS_EXTERNAL "${CMAKE_CURRENT_SOURCE_DIR}/ext")
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+if(MSVC)
+  add_definitions(-DNOMINMAX)
+  add_definitions(-DM_PI=3.14159265358979323846264338327950288)
+  add_definitions(-DM_PI_2=M_PI*2)
+  add_definitions(-D__DBL_MAX__=1.7976931348623158e+308)
+endif()
+
 include(${PROJECT_NAME}Dependencies)
 
 # libigl
@@ -36,7 +43,8 @@ find_package(LIBIGL REQUIRED QUIET)
 
 
 file(GLOB SRCFILES
-  src/main.cpp
+  # src/main.cpp
+  src/main_fork.cpp
   src/Optimizer.cpp
   src/TriMesh.cpp
   src/Scaffold.cpp

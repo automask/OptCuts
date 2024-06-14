@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/Debug/OptCuts_bin.exe",
+            "args": [
+                "100",
+                "${workspaceFolder}/input/bimba_i_f10000.obj",
+                "0.999",
+                "1",
+                "0",
+                "4.1",
+                "1",
+                "0"
+            ],
+            "cwd": "${workspaceRoot}",
+            "stopAtEntry": true,
+            "environment": [],
+            "console": "internalConsole",
+        },
+    ]
+}
